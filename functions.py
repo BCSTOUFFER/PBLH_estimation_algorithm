@@ -2,6 +2,7 @@
 import os
 import glob
 import math
+import pyart
 import numpy as np
 import pandas as pd
 import datetime as dt
@@ -270,4 +271,257 @@ def find_dvar_min_v2(mm, timezone, time_array, height_array, dvar,
     if smooth: 
         dvar_min_hgt = savgol_filter(dvar_min_hgt, window_length=25, polyorder=2)
     
-    return dvar_min_hgt, dvar_min_val, dvar_min_ind
+    return dvar_min_hgt
+    
+##########################################################################################################################################
+##########################################################################################################################################
+# Other functions that may be useful but are not necessary to reproduce findings:
+##########################################################################################################################################
+##########################################################################################################################################
+
+# function from pyart to generate QVP of azimuthal mean value
+def quasi_vertical_profile(radar, desired_angle=None, fields=None, gatefilter=None):
+    #Creating an empty dictonary
+    qvp = {}
+
+    # Setting the desired radar angle and getting index value for desired radar angle
+    if desired_angle is None:
+        desired_angle = 20.0
+    index = abs(radar.fixed_angle['data'] - desired_angle).argmin()
+    radar_slice = radar.get_slice(index)
+
+    # Setting field parameters
+    # If fields is None then all radar fields pulled else defined field is used
+    if fields is None:
+        fields = radar.fields
+
+        for field in fields:
+
+            # Filtering data based on defined gatefilter
+            # If none is defined goes to else statement
+            if gatefilter is not None:
+                get_fields = radar.get_field(index, field)
+                mask_fields = np.ma.masked_where(gatefilter.gate_excluded[radar_slice],
+                                                 get_fields)
+                radar_fields = np.ma.mean(mask_fields, axis=0)
+            else:
+                radar_fields = radar.get_field(index, field).mean(axis=0)
+
+            qvp.update({field:radar_fields})
+
+    else:
+        # Filtereing data based on defined gatefilter
+        # If none is defined goes to else statement
+        if gatefilter is not None:
+            get_field = radar.get_field(index, fields)
+            mask_field = np.ma.masked_where(gatefilter.gate_excluded[radar_slice],
+                                            get_field)
+            radar_field = np.ma.mean(mask_field, axis=0)
+        else:
+            radar_field = radar.get_field(index, fields).mean(axis=0)
+
+        qvp.update({fields:radar_field})
+
+    # Adding range, time, and height fields
+    qvp.update({'range': radar.range['data'], 'time': radar.time})
+    _, _, z = antenna_to_cartesian(qvp['range']/1000.0, 0.0,
+                                   radar.fixed_angle['data'][index])
+    qvp.update({'height': z})
+    return qvp
+    
+    
+# function adapted from pyart to generate QVP of azimuthal variance
+def quasi_vertical_profile_variance(radar, desired_angle=None, fields=None, gatefilter=None):
+    #Creating an empty dictonary
+    qvp = {}
+
+    # Setting the desired radar angle and getting index value for desired radar angle
+    if desired_angle is None:
+        desired_angle = 20.0
+    index = abs(radar.fixed_angle['data'] - desired_angle).argmin()
+    radar_slice = radar.get_slice(index)
+
+    # Setting field parameters
+    # If fields is None then all radar fields pulled else defined field is used
+    if fields is None:
+        fields = radar.fields
+
+        for field in fields:
+
+            # Filtering data based on defined gatefilter
+            # If none is defined goes to else statement
+            if gatefilter is not None:
+                get_fields = radar.get_field(index, field)
+                mask_fields = np.ma.masked_where(gatefilter.gate_excluded[radar_slice],
+                                                 get_fields)
+                radar_fields = np.ma.var(mask_fields, axis=0)
+            else:
+                radar_fields = radar.get_field(index, field).var(axis=0)
+
+            qvp.update({field:radar_fields})
+
+    else:
+        # Filtereing data based on defined gatefilter
+        # If none is defined goes to else statement
+        if gatefilter is not None:
+            get_field = radar.get_field(index, fields)
+            mask_field = np.ma.masked_where(gatefilter.gate_excluded[radar_slice],
+                                            get_field)
+            radar_field = np.ma.var(mask_field, axis=0)
+        else:
+            radar_field = radar.get_field(index, fields).var(axis=0)
+
+        qvp.update({fields:radar_field})
+
+    # Adding range, time, and height fields
+    qvp.update({'range': radar.range['data'], 'time': radar.time})
+    _, _, z = antenna_to_cartesian(qvp['range']/1000.0, 0.0,
+                                   radar.fixed_angle['data'][index])
+    qvp.update({'height': z})
+    return qvp  
+    
+# function from pyart to convert polar to cartesian
+def antenna_to_cartesian(ranges, azimuths, elevations):
+    theta_e = elevations * np.pi / 180.0    # elevation angle in radians.
+    theta_a = azimuths * np.pi / 180.0      # azimuth angle in radians.
+    R = 6371.0 * 1000.0 * 4.0 / 3.0     # effective radius of earth in meters.
+    r = ranges * 1000.0                 # distances to gates in meters.
+
+    z = (r ** 2 + R ** 2 + 2.0 * r * R * np.sin(theta_e)) ** 0.5 - R
+    s = R * np.arcsin(r * np.cos(theta_e) / (R + z))  # arc length in m.
+    x = s * np.sin(theta_a)
+    y = s * np.cos(theta_a)
+    return x, y, z
+    
+def smooth_QVP(var):
+  sz   = np.shape(var)
+  lend = sz[0]
+  mend = sz[1]
+
+  for l in range(3,lend-2):
+    for m in range(2,mend-1):
+      part0    = var[l-2,m-1]+var[l-2,m]+var[l-2,m+1]
+      part1    = var[l-1,m-1]+var[l-1,m]+var[l-1,m+1]
+      part2    = var[l,m-1]+var[l,m]+var[l,m+1]
+      part3    = var[l+1,m-1]+var[l+1,m]+var[l+1,m+1]
+      part4    = var[l+2,m-1]+var[l+2,m]+var[l+2,m+1]
+      var[l,m] = (1/15)*(part0+part1+part2+part3+part4)
+  
+  return var
+
+
+def create_qvp(fnames,elevation_angle=4.5):
+  '''
+  This function contains a (somewhat) simple algorithm to detect the
+  channel of reduced D-Var in QVPs that is associated with CBL top.
+  
+  ---------------------------------------------------------------------
+  
+  Inputs:
+  
+  mm : list
+      List of paths to radar files that will be processed.
+  elevation_angle : float (default 4.5)
+      Desired elevation angle to be used when creating QVPs. If
+      the desired angle is not available, will default to the next
+      lowest elevation angle.
+  
+  Outputs:
+  
+  dvar : array with shape [len(height_array), len(time_array)]
+      Array containing calculated values of D-Var.
+  zdr : array with shape [len(height_array), len(time_array)]
+      Array containing calculated values of ZDR.
+  zdrvar : array with shape [len(height_array), len(time_array)]
+      Array containing calculated values of ZDR variance.
+  time_array : array
+      Array containing UTC times of radar scans as fractional hours.
+  height_array : array
+      Array containing height of radar beam at each range gate.
+  lat : float
+      Latitude of radar (degrees N).
+  ---------------------------------------------------------------------
+  '''
+  # get number of files and length of file name
+  nfiles   = len(fnames)
+  file_len = len(fnames[0])
+  
+  # read first file outside of loop to get the lat, lon & height array
+  radtest      = pyart.io.read_nexrad_archive(fnames[0])
+  lat          = radtest.latitude['data'][0]
+  lon          = radtest.longitude['data'][0]
+  vartest      = quasi_vertical_profile(radar=radtest,desired_angle=elevation_angle,fields='differential_reflectivity')
+  height_array = vartest['height'] # height stays the same for each file
+  nheight      = len(height_array)
+  
+  # empty matrices to store QVPs, times
+  zdr        = np.empty([nfiles,nheight])
+  zdrvar     = np.empty([nfiles,nheight])
+  time_array = np.empty(nfiles)
+  
+  # loop through all radar files
+  for idx, fname in enumerate(fnames):
+
+    print('Reading data of {}'.format(fname))
+    
+    # read in each file using pyart, occasionally need to skip one if
+    # there is an error reading the file
+    try:
+      radar        = pyart.io.read_nexrad_archive(fname)
+    
+    # if there is an error, copy QVPs from previous file into current time
+    except:
+      zdr[idx]        = zdr[idx-1]
+      zdrvar[idx]     = zdrvar[idx-1]
+      time_str        = fname[file_len-10:file_len-4] # should work as long as files end with 'V06'
+      hour            = float(time_str[0:2])
+      minute          = float(time_str[2:4])
+      second          = float(time_str[4:6])
+      time_array[idx] = hour + (minute*60 + second)/3600 # UTC time
+      #os.remove(fname)
+      continue
+      
+    # converts data to QVP using pyart
+    var1      = quasi_vertical_profile(radar=radar,desired_angle=elevation_angle,fields='differential_reflectivity')
+    var2      = quasi_vertical_profile_variance(radar=radar,desired_angle=elevation_angle,fields='differential_reflectivity')
+    
+    # extract necessary variables
+    zdr[idx]    = var1['differential_reflectivity']
+    zdrvar[idx] = var2['differential_reflectivity']
+    
+    # get the time from the radar file name, convert to fractional hour
+    time_str        = fname[file_len-10:file_len-4]
+    hour            = float(time_str[0:2])
+    minute          = float(time_str[2:4])
+    second          = float(time_str[4:6])
+    time_array[idx] = hour + (minute*60 + second)/3600 # UTC
+    #os.remove(fname)
+    
+  print('Done with QVP creation')
+  
+  # transpose matrices for plotting/algorithm purposes
+  zdr    = np.matrix.transpose(zdr)
+  zdrvar = np.matrix.transpose(zdrvar)
+  
+  # compute DVar
+  dvar   = (np.absolute(zdr) + 1) * zdrvar
+  
+  return dvar, zdr, zdrvar, time_array, height_array, lat
+  
+def plot_QVP(time, height, dvar, dvar_min_hgt, zmax=3.5):
+    
+  plt.figure()
+  vmin = 0
+  vmax = 80
+  pm = plt.contourf(time,height/1000,dvar,cmap='nipy_spectral',vmin=vmin,vmax=vmax,levels=np.arange(vmin,vmax+.1,.5),extend='max')
+  plt.plot(time,dvar_min_hgt/1000,color='white')
+  
+  plt.colorbar(pm,orientation='vertical',ticks=np.arange(vmin,vmax+1,10),label='D-Var (dB$^3$)')
+  
+  plt.ylim(0,zmax)
+  plt.ylabel('Height (km)')
+  plt.xlabel('Time (UTC)')
+  plt.show()
+  
+  return
+  
