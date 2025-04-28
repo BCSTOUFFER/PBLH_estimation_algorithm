@@ -9,3 +9,6 @@ journal article (will update once published).
 
 Using Anaconda, the necessary environment can be created using:
 conda env create -f env.yml
+
+For the algorithm to function properly, the QVPs should begin around 8AM
+local time and end around 8PM local time.
