@@ -271,7 +271,130 @@ def find_dvar_min_v2(mm, timezone, time_array, height_array, dvar,
     if smooth: 
         dvar_min_hgt = savgol_filter(dvar_min_hgt, window_length=25, polyorder=2)
     
-    return dvar_min_hgt
+    return dvar_min_hgt,dvar_min_val, dvar_min_ind
+    
+
+def automated_EZ(time_array, height_array, dvar, dvar_min_hgt, dvar_min_val, dvar_min_ind, timezone, smooth=True, interval=7):
+
+    '''
+    This function contains a (somewhat) simple algorithm to estimate the EZ bounds
+    from QVPs of DVar following the methodology of Stouffer et al. (2025b).
+    
+    ---------------------------------------------------------------------
+    
+    Inputs:
+    
+    time_array : array
+        Array containing UTC times of radar scans as fractional hours.
+    height_array : array
+        Array containing height of radar beam at each range gate.
+    dvar : array with shape [len(height_array), len(time_array)]
+        Array containing calculated values of D-Var.
+    dvar_min_hgt : array
+        Array containing values of algorithm-estimated CBL depth.
+    dvar_min_val : array
+        Array containing values of DVar at algorithm-estimated CBL depth.
+    dvar_min_ind : array
+        Array containing index of height at algorithm-estimated CBL depth.
+    smooth : boolean, default = True
+        If true, applies smoothing to the input DVar.
+    interval : int or float, default = 7
+        User-specified interval to calculate DVar threshold used for determining
+        EZ bounds.
+    
+    Outputs:
+    
+    ez_top_height : array
+        Array of values estimating the upper EZ bound for each scan time.
+    ez_bot_height : array
+        Array of values estimating the lower EZ bound for each scan time.
+    act_flag : array
+        Array of values for the active cloud flag (0 = False, 1 = True).
+    
+    ---------------------------------------------------------------------
+    '''
+    
+    # determine time adjustment from LST to UTC
+    if timezone   == 'E': t_adj = 4
+    elif timezone == 'C': t_adj = 5
+    elif timezone == 'M': t_adj = 6
+    elif timezone == 'P': t_adj = 7
+
+    if smooth:
+        n = 0
+        while n < 3:
+            dvar = smooth_QVP(dvar)
+            n+=1
+    
+    # set some necessary variables
+    t_12_ind = np.where(time_array>12+t_adj)[0][0]
+    t_15_ind = np.where(time_array>15+t_adj)[0][0]
+    ez_dvar  = np.empty(np.shape(dvar))
+    ez_top   = []
+    ez_bot   = []
+    act_flag = []
+
+    # use minimum channel to detect EZ bounds
+    for col,val,ind in zip(range(0,len(time_array)),dvar_min_val,dvar_min_ind):
+        
+        # skip estimation when DVar > 80, so set EZ bottom > EZ top such that EZ depth is negative and can be ignored
+        if val > 80:
+            ez_bot.append(1)
+            ez_top.append(0)
+            act_flag.append(0)
+            continue
+        
+        # set EZ bound threshold
+        thresh = val+interval
+
+        # mask bottom data level to avoid erroneous detection
+        ez_dvar[:,col] = dvar[:,col]
+        if col >= t_12_ind:
+            ez_dvar[0,col] = 100
+
+        # find index of EZ top 
+        ez_top_ind = int(ind)+np.where(ez_dvar[int(ind):,col]>thresh)[0][0]
+        
+        # if CBL depth is at lowest data level, set EZ bottom to lowest data level as well
+        if dvar_min_ind[col] == 0:
+            ez_bot.append(0)
+            act_flag.append(0)
+            
+        else:
+            # find index of EZ bottom
+            try:
+                ez_bot_ind = int(ind)-np.where(np.flip(ez_dvar[0:int(dvar_min_ind[col]),col])>thresh)[0][0]
+            # occasionally returns an error, so set EZ bottom > EZ top such that EZ depth is negative and can be ignored
+            except:
+                ez_bot.append(ez_bot[-1])
+                ez_top.append(ez_top_ind)
+                act_flag.append(0)
+                continue
+                
+            # ensure EZ bottom (top of ML) increases before 1500 LT
+            if ((col < t_15_ind) and (ez_bot_ind < ez_bot[-1])) or (ez_dvar[ez_bot_ind-1,col]==100):
+                ez_bot.append(ez_bot[-1])
+            else:
+                ez_bot.append(ez_bot_ind)
+            
+            # determine active cloud flag based on 1000 m EZ depth threshold
+            if height_array[ez_top_ind] - height_array[ez_bot_ind] > 1000:
+                act_flag.append(1)
+            else:
+                act_flag.append(0)
+
+        ez_top.append(ez_top_ind)
+    
+    act_flag      = np.array(act_flag)
+    ez_top_height = height_array[ez_top]
+    ez_bot_height = height_array[ez_bot]
+    ez_depth      = ez_top_height - ez_bot_height
+    
+    for idx,value in enumerate(ez_depth):
+        if value < 0:
+            ez_depth[idx] = np.nan
+    
+    return ez_top_height, ez_bot_height, ez_depth, act_flag
     
 ##########################################################################################################################################
 ##########################################################################################################################################
@@ -508,19 +631,43 @@ def create_qvp(fnames,elevation_angle=4.5):
   
   return dvar, zdr, zdrvar, time_array, height_array, lat
   
-def plot_QVP(time, height, dvar, dvar_min_hgt, zmax=3.5):
+def add_vertical_cbar(fig,axt,axb,plot, offset = .01):
+  '''Adds vertical colorbar to single axis'''
+  axt_pos = axt.get_position()
+  axb_pos = axb.get_position()
+  height = axt_pos.y1 - axb_pos.y0
+  x1     = axb_pos.x1
+  y0     = axb_pos.y0
+  width  = .01
+  cax    = fig.add_axes([x1 + offset,y0, width, height])
+  cbar   = plt.colorbar(plot,cax = cax, orientation = 'vertical')
+  return cbar
+  
+def plot_QVP(time, height, dvar, dvar_min_hgt, ez_top_height, ez_bot_height, zmax=3.5):
     
-  plt.figure()
+  fig, axs = plt.subplots(1,2,figsize=[6,3],sharey=True)
+  
   vmin = 0
   vmax = 80
-  pm = plt.contourf(time,height/1000,dvar,cmap='nipy_spectral',vmin=vmin,vmax=vmax,levels=np.arange(vmin,vmax+.1,.5),extend='max')
-  plt.plot(time,dvar_min_hgt/1000,color='white')
+  pm = axs[0].contourf(time,height/1000,dvar,cmap='nipy_spectral',vmin=vmin,vmax=vmax,levels=np.arange(vmin,vmax+.1,.5),extend='max')
+  axs[0].plot(time,dvar_min_hgt/1000,color='white')
+  cbar = add_vertical_cbar(fig,axs[0],axs[0],pm)
+  cbar.set_label('DVar (dB$^3$)')
+  cbar.set_ticks(np.arange(0,vmax+.1,20))
   
-  plt.colorbar(pm,orientation='vertical',ticks=np.arange(vmin,vmax+1,10),label='D-Var (dB$^3$)')
+  axs[0].set_xlim(12,24)
+  axs[0].set_ylim(0,zmax)
+  axs[0].set_ylabel('Height (km)')
+  axs[0].set_xlabel('Time (UTC)')
   
-  plt.ylim(0,zmax)
-  plt.ylabel('Height (km)')
-  plt.xlabel('Time (UTC)')
+  axs[1].fill_between(time,4,ez_top_height/1000,color='deepskyblue',label='FA')
+  axs[1].fill_between(time,ez_top_height/1000,ez_bot_height/1000,color='rebeccapurple',label='EZ')
+  axs[1].fill_between(time,ez_bot_height/1000,148/1000,color='crimson',alpha=.9,label='ML')
+  axs[1].legend(fancybox=False,facecolor='white',framealpha=1,edgecolor='k',fontsize=9,loc='upper left')
+  
+  axs[1].set_xlim(12,24)
+  axs[1].set_ylim(0,zmax)
+  axs[1].set_xlabel('Time (UTC)')
   plt.show()
   
   return

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 from functions import *
 
-path_to_files = 'enter_path_here'
+path_to_files = '/path/to/files'
 fnames = sorted(glob.glob(path_to_files))
 
 # change for the case you are using
@@ -29,9 +29,15 @@ while n<2:
   dvar = smooth_QVP(dvar)
   n+=1
 
-# apply algorithm
-dvar_min_hgt = find_dvar_min_v2(mm, timezone, time_array, height_array, dvar,
-                  max_growth, min_growth = -300, hstep = 20, smooth=False)
+# apply CBL depth algorithm
+dvar_min_hgt, dvar_min_val, dvar_min_ind = find_dvar_min_v2(mm, timezone, time_array, height_array, dvar,
+                                              max_growth, min_growth = -300, hstep = 20, smooth=False)
+
+# apply EZ detection algorithm            
+ez_top_height, ez_bot_height, ez_depth, act_flag = automated_EZ(time_array, height_array, dvar, 
+                                            dvar_min_hgt, dvar_min_val, dvar_min_ind, timezone, smooth=True, interval=7)
             
 # plot QVP with estimated PBLH      
-plot_QVP(time_array, height_array, dvar, dvar_min_hgt, zmax=3)
+plot_QVP(time_array, height_array, dvar, dvar_min_hgt, ez_top_height, ez_bot_height, zmax=3)
+
+
